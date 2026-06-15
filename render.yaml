@@ -3,7 +3,7 @@ services:
     name: ai-resume-matcher
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn resume_matcher.main:app --host 0.0.0.0 --port 10000 --app-dir src
+    startCommand: uvicorn resume_matcher.main:app --host 0.0.0.0 --port $PORT --app-dir src
     envVars:
       - key: GEMINI_API_KEY
         sync: false
