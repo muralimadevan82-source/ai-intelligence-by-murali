@@ -1,8 +1,6 @@
 import os
 import re
 import io
-import tempfile
-from pathlib import Path
 
 import streamlit as st
 from google import genai
@@ -17,7 +15,6 @@ st.set_page_config(
 
 # ── Constants ────────────────────────────────────────────────────────────────
 DEFAULT_MODEL = "gemini-2.0-flash"
-SIDEBAR_LOGO = ""
 
 # ── Session state ────────────────────────────────────────────────────────────
 for key in ("resume_text", "jd_text", "analysis_result", "chat_history"):
@@ -263,7 +260,6 @@ elif page == "ATS Match Score":
             st.subheader("Summary")
             st.write(parsed["summary"])
 
-        parsed2 = parse_analysis(st.session_state.analysis_result)
         st.subheader("Score Breakdown")
         breakdown = {
             "Keyword Match": min(score * 0.35, 35),
