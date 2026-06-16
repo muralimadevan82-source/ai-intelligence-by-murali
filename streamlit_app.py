@@ -1,11 +1,12 @@
 import os
 import re
 import io
+from collections import Counter
 
 import streamlit as st
 from google import genai
+from google.genai import types as genai_types
 
-# ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="ATS Intelligence",
     page_icon="",
@@ -13,23 +14,33 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── Constants ────────────────────────────────────────────────────────────────
 DEFAULT_MODEL = "gemini-2.0-flash"
+FALLBACK_MODELS = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
 
-# ── Session state ────────────────────────────────────────────────────────────
-for key in ("resume_text", "jd_text", "analysis_result", "chat_history"):
+for key in ("resume_text", "jd_text", "analysis_result", "chat_history", "use_local"):
     if key not in st.session_state:
         st.session_state[key] = "" if key != "chat_history" else []
+    if key == "use_local" and st.session_state[key] == "":
+        st.session_state[key] = False
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+STOPWORDS = {
+    "the","a","an","and","or","in","of","to","for","with","on","at","by","is","are",
+    "was","were","be","been","being","have","has","had","do","does","did","will",
+    "would","could","should","may","might","shall","can","need","must","this","that",
+    "these","those","it","its","we","our","you","your","they","their","them","not",
+    "no","nor","but","so","if","than","then","also","very","just","about","above",
+    "after","all","any","because","before","between","both","each","few","more",
+    "most","other","some","such","only","own","same","too","under","up","into",
+    "over","here","there","when","where","why","how","what","which","who","whom",
+}
+
 
 def get_client():
     api_key = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
     if not api_key:
         api_key = st.session_state.get("gemini_api_key", "")
     if not api_key:
-        st.error("Gemini API key missing. Set GEMINI_API_KEY in secrets or enter it in Settings.")
-        st.stop()
+        return None
     return genai.Client(api_key=api_key)
 
 
@@ -45,11 +56,6 @@ def extract_text_from_file(uploaded_file) -> str:
             import pdfplumber
             with pdfplumber.open(io.BytesIO(raw)) as pdf:
                 return "\n".join(p.text or "" for p in pdf.pages)
-        except ImportError:
-            pass
-        try:
-            from pdfminer.high_level import extract_text
-            return extract_text(io.BytesIO(raw))
         except ImportError:
             pass
         try:
@@ -70,10 +76,22 @@ def extract_text_from_file(uploaded_file) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def call_gemini(prompt: str, model: str = DEFAULT_MODEL) -> str:
+def call_gemini(prompt: str, model: str = DEFAULT_MODEL) -> str | None:
     client = get_client()
-    resp = client.models.generate_content(model=model, contents=prompt)
-    return resp.text
+    if client is None:
+        return None
+    try:
+        resp = client.models.generate_content(model=model, contents=prompt)
+        if resp.text:
+            return resp.text
+        if resp.candidates and resp.candidates[0].finish_reason == 4:
+            return None
+        return None
+    except Exception as e:
+        err_str = str(e).lower()
+        if "429" in err_str or "quota" in err_str or "resource_exhausted" in err_str:
+            return None
+        raise
 
 
 def parse_analysis(text: str) -> dict:
@@ -96,7 +114,41 @@ def parse_analysis(text: str) -> dict:
     return {"score": score, "matched": matched, "missing": missing, "summary": summary or text[:500]}
 
 
-# ── Prompts ──────────────────────────────────────────────────────────────────
+def local_analyze(resume_text: str, jd_text: str) -> str:
+    resume_lower = resume_text.lower()
+    jd_lower = jd_text.lower()
+    jd_words = [w for w in re.findall(r'\b[a-zA-Z]{3,}\b', jd_lower) if w not in STOPWORDS]
+    resume_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', resume_lower))
+    word_counts = Counter(jd_words)
+    jd_ranked = sorted(word_counts.items(), key=lambda x: -x[1])
+    matched = []
+    missing = []
+    for word, count in jd_ranked[:50]:
+        if word in resume_words:
+            matched.append(word)
+        elif count > 1:
+            missing.append(word)
+    score = (len(matched) / max(len(matched) + len(missing), 1)) * 100 if matched or missing else 0
+
+    lines = [
+        f"ATS Score: {score:.0f}",
+        f"Matched Keywords: {', '.join(matched[:20]) if matched else 'None found'}",
+        f"Missing Keywords: {', '.join(missing[:20]) if missing else 'None detected'}",
+        f"Summary: Found {len(matched)} matching keywords out of {len(matched) + len(missing)} key terms identified in the job description.",
+        f"Skill Gaps: {', '.join(missing[:10]) if missing else 'No significant gaps detected'}",
+        f"Recommendations: {'Focus on adding: ' + ', '.join(missing[:5]) if missing else 'Your resume aligns well with this role.'}",
+    ]
+    return "\n".join(lines)
+
+
+def try_gemini_with_fallback(prompt: str, model: str = DEFAULT_MODEL) -> str | None:
+    models_to_try = [model] + [m for m in FALLBACK_MODELS if m != model]
+    for m in models_to_try:
+        result = call_gemini(prompt, model=m)
+        if result is not None:
+            return result
+    return None
+
 
 ANALYSIS_PROMPT = """You are an expert ATS (Applicant Tracking System) analyzer. Analyze this resume against the job description.
 
@@ -162,8 +214,6 @@ Resume:
 Job Description:
 {jd}"""
 
-# ── Sidebar ──────────────────────────────────────────────────────────────────
-
 with st.sidebar:
     st.title("ATS Intelligence")
     st.caption("AI-Powered Resume Analysis")
@@ -185,19 +235,20 @@ with st.sidebar:
     st.caption("Made by Murali Madevan")
     st.caption("[LinkedIn](https://www.linkedin.com/in/murali-madevan/)")
 
-# ── Pages ────────────────────────────────────────────────────────────────────
-
 if page == "Settings":
     st.header("Settings")
     current_key = st.session_state.get("gemini_api_key", "")
     new_key = st.text_input("Gemini API Key", value=current_key, type="password")
     if new_key:
         st.session_state["gemini_api_key"] = new_key
+    st.session_state["use_local"] = st.toggle("Use local analysis only (no API key needed)", value=st.session_state.get("use_local", False))
     if st.button("Clear session data"):
         for key in list(st.session_state.keys()):
-            if key != "gemini_api_key":
+            if key != "gemini_api_key" and key != "use_local":
                 del st.session_state[key]
         st.rerun()
+    if st.session_state.get("use_local"):
+        st.info("Local analysis mode active. AI features (Coach, Optimizer, Cover Letter) will be limited.")
 
 elif page == "Resume Upload & Analysis":
     st.header("Resume Upload & Analysis")
@@ -221,17 +272,32 @@ elif page == "Resume Upload & Analysis":
         elif not st.session_state.jd_text or len(st.session_state.jd_text) < 20:
             st.error("Job description too short (min 20 chars)")
         else:
-            with st.spinner("Analyzing with Gemini..."):
-                prompt = ANALYSIS_PROMPT.format(
-                    resume=st.session_state.resume_text[:15000],
-                    jd=st.session_state.jd_text[:10000],
-                )
-                try:
-                    result = call_gemini(prompt)
+            if st.session_state.get("use_local"):
+                with st.spinner("Running local analysis..."):
+                    result = local_analyze(
+                        st.session_state.resume_text[:15000],
+                        st.session_state.jd_text[:10000],
+                    )
                     st.session_state["analysis_result"] = result
-                    st.success("Analysis complete!")
-                except Exception as e:
-                    st.error(f"Analysis failed: {e}")
+                    st.info("Local analysis complete. For AI-powered results, disable local mode and add a Gemini API key in Settings.")
+            else:
+                with st.spinner("Analyzing with Gemini..."):
+                    prompt = ANALYSIS_PROMPT.format(
+                        resume=st.session_state.resume_text[:15000],
+                        jd=st.session_state.jd_text[:10000],
+                    )
+                    result = try_gemini_with_fallback(prompt)
+                    if result is not None:
+                        st.session_state["analysis_result"] = result
+                        st.success("Analysis complete!")
+                    else:
+                        st.warning("Gemini API quota exceeded. Falling back to local analysis.")
+                        result = local_analyze(
+                            st.session_state.resume_text[:15000],
+                            st.session_state.jd_text[:10000],
+                        )
+                        st.session_state["analysis_result"] = result
+                        st.info("Local analysis complete. Add a Gemini API key in Settings for AI-powered results.")
 
     if st.session_state.get("analysis_result"):
         with st.expander("Raw Analysis", expanded=False):
@@ -276,16 +342,35 @@ elif page == "Skill Gap Detection":
         st.info("Go to 'Resume Upload & Analysis' to run an analysis first.")
     else:
         if st.button("Analyze Skill Gaps", type="primary"):
-            with st.spinner("Analyzing skill gaps..."):
-                prompt = SKILL_GAP_PROMPT.format(
-                    resume=st.session_state.resume_text[:15000],
-                    jd=st.session_state.jd_text[:10000],
-                )
-                try:
-                    result = call_gemini(prompt)
-                    st.markdown(result)
-                except Exception as e:
-                    st.error(f"Skill gap analysis failed: {e}")
+            if st.session_state.get("use_local"):
+                parsed = parse_analysis(st.session_state.analysis_result)
+                if parsed["missing"]:
+                    st.subheader("Detected Gaps")
+                    for skill in parsed["missing"]:
+                        with st.container(border=True):
+                            st.write(f"**{skill}**")
+                            st.write("Criticality: Important")
+                            st.write("Resource: Search LinkedIn Learning or Coursera")
+                else:
+                    st.info("No skill gaps detected.")
+            else:
+                with st.spinner("Analyzing skill gaps..."):
+                    prompt = SKILL_GAP_PROMPT.format(
+                        resume=st.session_state.resume_text[:15000],
+                        jd=st.session_state.jd_text[:10000],
+                    )
+                    result = try_gemini_with_fallback(prompt)
+                    if result is not None:
+                        st.markdown(result)
+                    else:
+                        st.warning("Gemini unavailable. Showing basic gaps.")
+                        parsed = parse_analysis(st.session_state.analysis_result)
+                        if parsed["missing"]:
+                            for skill in parsed["missing"]:
+                                with st.container(border=True):
+                                    st.write(f"**{skill}**")
+                        else:
+                            st.info("No skill gaps detected.")
     if st.session_state.get("analysis_result"):
         parsed = parse_analysis(st.session_state.analysis_result)
         if parsed["missing"]:
@@ -301,77 +386,79 @@ elif page == "Resume Optimizer":
     else:
         st.info("This will rewrite your resume to better match the job description while preserving your genuine experience.")
         if st.button("Optimize Resume", type="primary"):
-            with st.spinner("Optimizing resume..."):
-                prompt = OPTIMIZER_PROMPT.format(
-                    resume=st.session_state.resume_text[:15000],
-                    jd=st.session_state.jd_text[:10000],
-                )
-                try:
-                    result = call_gemini(prompt)
-                    st.subheader("Optimized Resume")
-                    st.markdown(result)
-                    st.download_button(
-                        "Download as TXT",
-                        data=result,
-                        file_name="optimized_resume.txt",
-                        mime="text/plain",
+            if st.session_state.get("use_local"):
+                st.warning("Resume optimizer requires Gemini API. Add an API key in Settings or disable local mode.")
+            else:
+                with st.spinner("Optimizing resume..."):
+                    prompt = OPTIMIZER_PROMPT.format(
+                        resume=st.session_state.resume_text[:15000],
+                        jd=st.session_state.jd_text[:10000],
                     )
-                except Exception as e:
-                    st.error(f"Optimization failed: {e}")
+                    result = try_gemini_with_fallback(prompt)
+                    if result is not None:
+                        st.subheader("Optimized Resume")
+                        st.markdown(result)
+                        st.download_button(
+                            "Download as TXT", data=result, file_name="optimized_resume.txt", mime="text/plain",
+                        )
+                    else:
+                        st.error("All Gemini models are quota-exceeded. Try again later or use a different API key.")
 
 elif page == "AI Career Coach":
     st.header("AI Career Coach")
     if not st.session_state.resume_text or not st.session_state.jd_text:
         st.info("Upload a resume and job description first to enable career coaching.")
     else:
-        for msg in st.session_state.chat_history:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
-
-        if prompt := st.chat_input("Ask your career coach..."):
-            st.session_state.chat_history.append({"role": "user", "content": prompt})
-            with st.chat_message("user"):
-                st.markdown(prompt)
-            history_text = "\n".join(
-                f"{m['role']}: {m['content']}" for m in st.session_state.chat_history[-6:]
-            )
-            full_prompt = COACH_PROMPT.format(
-                resume=st.session_state.resume_text[:15000],
-                jd=st.session_state.jd_text[:10000],
-                history=history_text,
-                message=prompt,
-            )
-            with st.chat_message("assistant"):
-                with st.spinner("Thinking..."):
-                    try:
-                        response = call_gemini(full_prompt)
-                        st.markdown(response)
-                        st.session_state.chat_history.append({"role": "assistant", "content": response})
-                    except Exception as e:
-                        st.error(f"Coach response failed: {e}")
+        if st.session_state.get("use_local"):
+            st.warning("Career Coach requires Gemini API. Add an API key in Settings or disable local mode.")
+        else:
+            for msg in st.session_state.chat_history:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
+            if prompt := st.chat_input("Ask your career coach..."):
+                st.session_state.chat_history.append({"role": "user", "content": prompt})
+                with st.chat_message("user"):
+                    st.markdown(prompt)
+                history_text = "\n".join(
+                    f"{m['role']}: {m['content']}" for m in st.session_state.chat_history[-6:]
+                )
+                full_prompt = COACH_PROMPT.format(
+                    resume=st.session_state.resume_text[:15000],
+                    jd=st.session_state.jd_text[:10000],
+                    history=history_text,
+                    message=prompt,
+                )
+                with st.chat_message("assistant"):
+                    with st.spinner("Thinking..."):
+                        result = try_gemini_with_fallback(full_prompt)
+                        if result is not None:
+                            st.markdown(result)
+                            st.session_state.chat_history.append({"role": "assistant", "content": result})
+                        else:
+                            st.error("All Gemini models are quota-exceeded. Try again later.")
 
 elif page == "Cover Letter Generator":
     st.header("Cover Letter Generator")
     if not st.session_state.resume_text or not st.session_state.jd_text:
         st.info("Upload a resume and job description first.")
     else:
-        tone = st.selectbox("Tone", ["Professional", "Enthusiastic", "Formal", "Concise"])
-        if st.button("Generate Cover Letter", type="primary"):
-            with st.spinner("Generating cover letter..."):
-                prompt = COVER_LETTER_PROMPT.format(
-                    resume=st.session_state.resume_text[:15000],
-                    jd=st.session_state.jd_text[:10000],
-                )
-                prompt = f"Tone: {tone}\n\n{prompt}"
-                try:
-                    result = call_gemini(prompt)
-                    st.subheader("Cover Letter")
-                    st.markdown(result)
-                    st.download_button(
-                        "Download as TXT",
-                        data=result,
-                        file_name="cover_letter.txt",
-                        mime="text/plain",
+        if st.session_state.get("use_local"):
+            st.warning("Cover Letter Generator requires Gemini API. Add an API key in Settings or disable local mode.")
+        else:
+            tone = st.selectbox("Tone", ["Professional", "Enthusiastic", "Formal", "Concise"])
+            if st.button("Generate Cover Letter", type="primary"):
+                with st.spinner("Generating cover letter..."):
+                    prompt = COVER_LETTER_PROMPT.format(
+                        resume=st.session_state.resume_text[:15000],
+                        jd=st.session_state.jd_text[:10000],
                     )
-                except Exception as e:
-                    st.error(f"Cover letter generation failed: {e}")
+                    prompt = f"Tone: {tone}\n\n{prompt}"
+                    result = try_gemini_with_fallback(prompt)
+                    if result is not None:
+                        st.subheader("Cover Letter")
+                        st.markdown(result)
+                        st.download_button(
+                            "Download as TXT", data=result, file_name="cover_letter.txt", mime="text/plain",
+                        )
+                    else:
+                        st.error("All Gemini models are quota-exceeded. Try again later.")
