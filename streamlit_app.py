@@ -520,6 +520,107 @@ I would welcome the opportunity to discuss how my background and skills can cont
 {email}
 {'(' + tone.lower() + ' tone)'}"""
 
+def make_pdf(text: str, title: str = "Document") -> bytes:
+    try:
+        from fpdf import FPDF
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_auto_page_break(auto=True, margin=15)
+        font_paths = [
+            ("C:\\Windows\\Fonts\\DejaVuSans.ttf", "C:\\Windows\\Fonts\\DejaVuSans-Bold.ttf"),
+            ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+            ("/usr/share/fonts/dejavu-sans/DejaVuSans.ttf", "/usr/share/fonts/dejavu-sans/DejaVuSans-Bold.ttf"),
+        ]
+        font_ok = False
+        for reg, bold in font_paths:
+            if __import__("os").path.exists(reg):
+                pdf.add_font("CustomFont", "", reg, uni=True)
+                if __import__("os").path.exists(bold):
+                    pdf.add_font("CustomFont", "B", bold, uni=True)
+                font_ok = True
+                break
+        if not font_ok:
+            pdf.set_font("Helvetica", "B", 16)
+            pdf.cell(0, 10, title, new_x="LMARGIN", new_y="NEXT")
+            pdf.ln(5)
+            pdf.set_font("Helvetica", "", 10)
+            for line in text.split("\n"):
+                stripped = line.strip()
+                if not stripped:
+                    pdf.ln(3)
+                elif stripped.startswith("##"):
+                    pdf.ln(3); pdf.set_font("Helvetica", "B", 13)
+                    pdf.cell(0, 8, stripped.lstrip("#").strip()[:200], new_x="LMARGIN", new_y="NEXT")
+                    pdf.set_font("Helvetica", "", 10)
+                elif stripped.startswith("#"):
+                    pdf.ln(3); pdf.set_font("Helvetica", "B", 14)
+                    pdf.cell(0, 9, stripped.lstrip("#").strip()[:200], new_x="LMARGIN", new_y="NEXT")
+                    pdf.set_font("Helvetica", "", 10)
+                elif stripped.startswith("- ") or stripped.startswith("* "):
+                    pdf.cell(5)
+                    pdf.multi_cell(0, 5, stripped[2:].encode("latin-1", "replace").decode("latin-1"))
+                else:
+                    pdf.multi_cell(0, 5, stripped.encode("latin-1", "replace").decode("latin-1"))
+            return bytes(pdf.output())
+        pdf.set_font("CustomFont", "B", 16)
+        pdf.cell(0, 10, title, new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(5)
+        pdf.set_font("CustomFont", "", 10)
+        for line in text.split("\n"):
+            stripped = line.strip()
+            if not stripped:
+                pdf.ln(3)
+            elif stripped.startswith("##"):
+                pdf.ln(3)
+                pdf.set_font("CustomFont", "B", 13)
+                pdf.cell(0, 8, stripped.lstrip("#").strip(), new_x="LMARGIN", new_y="NEXT")
+                pdf.set_font("CustomFont", "", 10)
+            elif stripped.startswith("#"):
+                pdf.ln(3)
+                pdf.set_font("CustomFont", "B", 14)
+                pdf.cell(0, 9, stripped.lstrip("#").strip(), new_x="LMARGIN", new_y="NEXT")
+                pdf.set_font("CustomFont", "", 10)
+            elif stripped.startswith("- ") or stripped.startswith("* "):
+                pdf.cell(5)
+                pdf.multi_cell(0, 5, stripped[2:])
+            else:
+                pdf.multi_cell(0, 5, stripped)
+        return bytes(pdf.output())
+    except Exception:
+        return text.encode("utf-8")
+
+
+def make_docx(text: str, title: str = "Document") -> bytes:
+    try:
+        from docx import Document
+        from docx.shared import Pt
+        from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+        doc = Document()
+        style = doc.styles["Normal"]
+        font = style.font
+        font.name = "Calibri"
+        font.size = Pt(11)
+        p = doc.add_heading(title, 0)
+        p.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+        for line in text.split("\n"):
+            stripped = line.strip()
+            if not stripped:
+                pass
+            elif stripped.startswith("##"):
+                doc.add_heading(stripped.lstrip("#").strip(), level=2)
+            elif stripped.startswith("#"):
+                doc.add_heading(stripped.lstrip("#").strip(), level=1)
+            elif stripped.startswith("- ") or stripped.startswith("* "):
+                doc.add_paragraph(stripped[2:], style="List Bullet")
+            else:
+                doc.add_paragraph(stripped)
+        buf = io.BytesIO()
+        doc.save(buf)
+        return buf.getvalue()
+    except Exception:
+        return text.encode("utf-8")
+
+
 ANALYSIS_PROMPT = """You are an expert ATS (Applicant Tracking System) analyzer. Analyze this resume against the job description.
 
 Resume:
@@ -849,9 +950,15 @@ elif page == "Optimizer":
                         st.session_state.jd_text[:10000],
                     )
                     st.markdown(f'<div class="card">{result}</div>', unsafe_allow_html=True)
-                st.download_button(
-                    "Download as TXT", data=result, file_name="optimized_resume.txt", mime="text/plain",
-                )
+                fmt = st.selectbox("Download format", ["PDF", "DOCX", "TXT"], key="opt_fmt")
+                if fmt == "PDF":
+                    data = make_pdf(result, "Optimized Resume")
+                    st.download_button("Download", data=data, file_name="optimized_resume.pdf", mime="application/pdf")
+                elif fmt == "DOCX":
+                    data = make_docx(result, "Optimized Resume")
+                    st.download_button("Download", data=data, file_name="optimized_resume.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                else:
+                    st.download_button("Download", data=result, file_name="optimized_resume.txt", mime="text/plain")
 
 elif page == "Career Coach":
     st.markdown('<div class="gradient-header">AI Career Coach</div>', unsafe_allow_html=True)
@@ -912,9 +1019,15 @@ elif page == "Cover Letter":
                         tone,
                     )
                     st.markdown(f'<div class="card">{result}</div>', unsafe_allow_html=True)
-                st.download_button(
-                    "Download as TXT", data=result, file_name="cover_letter.txt", mime="text/plain",
-                )
+                fmt = st.selectbox("Download format", ["PDF", "DOCX", "TXT"], key="cl_fmt")
+                if fmt == "PDF":
+                    data = make_pdf(result, "Cover Letter")
+                    st.download_button("Download", data=data, file_name="cover_letter.pdf", mime="application/pdf")
+                elif fmt == "DOCX":
+                    data = make_docx(result, "Cover Letter")
+                    st.download_button("Download", data=data, file_name="cover_letter.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                else:
+                    st.download_button("Download", data=result, file_name="cover_letter.txt", mime="text/plain")
 
 elif page == "Settings":
     st.markdown('<div class="gradient-header">Settings</div>', unsafe_allow_html=True)
