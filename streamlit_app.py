@@ -5,7 +5,6 @@ from collections import Counter
 
 import streamlit as st
 from google import genai
-from google.genai import types as genai_types
 
 st.set_page_config(
     page_title="ATS Intelligence",
@@ -99,19 +98,67 @@ def parse_analysis(text: str) -> dict:
     matched = []
     missing = []
     summary = ""
+    recommendations = ""
     m = re.search(r"(?:ATS\s*)?[Ss]core[^\d]*(\d+(?:\.\d+)?)", text)
     if m:
         score = min(float(m.group(1)), 100)
-    m = re.search(r"(?:[Mm]atched|Found)[^:]*:?\s*(.+)", text)
+    m = re.search(r"(?:[Mm]atched|Found)[^:]*:?\s*(.+?)(?:\n|$)", text)
     if m:
         matched = [x.strip() for x in re.split(r"[,;]", m.group(1)) if x.strip()]
-    m = re.search(r"(?:[Mm]issing|[Gg]ap)[^:]*:?\s*(.+)", text)
+    m = re.search(r"(?:[Mm]issing|[Gg]ap)[^:]*:?\s*(.+?)(?:\n|$)", text)
     if m:
         missing = [x.strip() for x in re.split(r"[,;]", m.group(1)) if x.strip()]
-    m = re.search(r"(?:[Ss]ummary|[Oo]verview)[^:]*:?\s*(.+?)(?=\n\n|\Z)", text, re.DOTALL)
+    m = re.search(r"(?:[Ss]ummary|[Oo]verview)[^:]*:?\s*(.+?)(?=\n[A-Z]|\n*$)", text, re.DOTALL)
     if m:
         summary = m.group(1).strip()
-    return {"score": score, "matched": matched, "missing": missing, "summary": summary or text[:500]}
+    m = re.search(r"(?:[Rr]ecommendations|[Ss]uggestions)[^:]*:?\s*(.+?)(?=\n[A-Z]|\n*$)", text, re.DOTALL)
+    if m:
+        recommendations = m.group(1).strip()
+    return {
+        "score": score,
+        "matched": matched,
+        "missing": missing,
+        "summary": summary or text[:300],
+        "recommendations": recommendations,
+    }
+
+
+def render_analysis_results(parsed: dict):
+    score = parsed["score"]
+    matched = parsed["matched"]
+    missing = parsed["missing"]
+    summary = parsed["summary"]
+    recommendations = parsed["recommendations"]
+
+    st.subheader("ATS Match Score")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("ATS Score", f"{score:.0f}%")
+        st.progress(score / 100)
+    with c2:
+        st.metric("Matched Keywords", str(len(matched)))
+    with c3:
+        st.metric("Missing Keywords", str(len(missing)))
+
+    if matched:
+        st.write("**Matched:**", ", ".join(matched[:15]))
+    if missing:
+        st.write("**Missing:**", ", ".join(missing[:15]))
+
+    if summary:
+        st.subheader("Summary")
+        st.write(summary)
+
+    if recommendations:
+        st.subheader("Recommendations")
+        st.write(recommendations)
+
+    if matched or missing:
+        st.subheader("Keyword Breakdown")
+        for kw in matched[:10]:
+            st.markdown(f"- ✅ **{kw}** — Found in resume")
+        for kw in missing[:10]:
+            st.markdown(f"- ❌ **{kw}** — Missing from resume")
 
 
 def local_analyze(resume_text: str, jd_text: str) -> str:
@@ -136,7 +183,7 @@ def local_analyze(resume_text: str, jd_text: str) -> str:
         f"Missing Keywords: {', '.join(missing[:20]) if missing else 'None detected'}",
         f"Summary: Found {len(matched)} matching keywords out of {len(matched) + len(missing)} key terms identified in the job description.",
         f"Skill Gaps: {', '.join(missing[:10]) if missing else 'No significant gaps detected'}",
-        f"Recommendations: {'Focus on adding: ' + ', '.join(missing[:5]) if missing else 'Your resume aligns well with this role.'}",
+        f"Recommendations: {'Focus on learning and adding these key skills: ' + ', '.join(missing[:5]) if missing else 'Your resume aligns well with this role.'}",
     ]
     return "\n".join(lines)
 
@@ -300,6 +347,9 @@ elif page == "Resume Upload & Analysis":
                         st.info("Local analysis complete. Add a Gemini API key in Settings for AI-powered results.")
 
     if st.session_state.get("analysis_result"):
+        st.divider()
+        parsed = parse_analysis(st.session_state.analysis_result)
+        render_analysis_results(parsed)
         with st.expander("Raw Analysis", expanded=False):
             st.text(st.session_state.analysis_result)
 
@@ -309,24 +359,10 @@ elif page == "ATS Match Score":
         st.info("Go to 'Resume Upload & Analysis' to run an analysis first.")
     else:
         parsed = parse_analysis(st.session_state.analysis_result)
-        score = parsed["score"]
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("ATS Score", f"{score:.0f}%")
-            st.progress(score / 100)
-        with col2:
-            st.metric("Matched Keywords", str(len(parsed["matched"])))
-            if parsed["matched"]:
-                st.write("**Matched:**", ", ".join(parsed["matched"][:15]))
-        with col3:
-            st.metric("Missing Keywords", str(len(parsed["missing"])))
-            if parsed["missing"]:
-                st.write("**Missing:**", ", ".join(parsed["missing"][:15]))
-        if parsed["summary"]:
-            st.subheader("Summary")
-            st.write(parsed["summary"])
+        render_analysis_results(parsed)
 
         st.subheader("Score Breakdown")
+        score = parsed["score"]
         breakdown = {
             "Keyword Match": min(score * 0.35, 35),
             "Content Relevance": min(score * 0.30, 30),
