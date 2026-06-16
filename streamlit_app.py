@@ -83,14 +83,9 @@ def call_gemini(prompt: str, model: str = DEFAULT_MODEL) -> str | None:
         resp = client.models.generate_content(model=model, contents=prompt)
         if resp.text:
             return resp.text
-        if resp.candidates and resp.candidates[0].finish_reason == 4:
-            return None
         return None
-    except Exception as e:
-        err_str = str(e).lower()
-        if "429" in err_str or "quota" in err_str or "resource_exhausted" in err_str:
-            return None
-        raise
+    except Exception:
+        return None
 
 
 def parse_analysis(text: str) -> dict:
@@ -197,6 +192,191 @@ def try_gemini_with_fallback(prompt: str, model: str = DEFAULT_MODEL) -> str | N
     return None
 
 
+def local_skill_gaps(resume_text: str, jd_text: str) -> str:
+    resume_lower = resume_text.lower()
+    jd_lower = jd_text.lower()
+    jd_words = [w for w in re.findall(r'\b[a-zA-Z]{3,}\b', jd_lower) if w not in STOPWORDS]
+    resume_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', resume_lower))
+    word_counts = Counter(jd_words)
+    jd_ranked = sorted(word_counts.items(), key=lambda x: -x[1])
+
+    lines = ["## Skill Gap Analysis Report\n"]
+    found_gap = False
+    for word, count in jd_ranked[:30]:
+        if word not in resume_words:
+            found_gap = True
+            lines.append(f"### ❌ {word.title()}")
+            lines.append(f"- **Criticality**: {'Critical' if count > 3 else 'Important' if count > 1 else 'Nice-to-have'}")
+            lines.append(f"- **Why it matters**: Mentioned {count} time(s) in the job description")
+            lines.append(f"- **Learning resource**: Search LinkedIn Learning, Coursera, or freeCodeCamp for '{word}'")
+            lines.append(f"- **Estimated time**: {'2-4 weeks' if count > 3 else '1-2 weeks' if count > 1 else 'A few days'}")
+            lines.append("")
+    if not found_gap:
+        lines.append("No significant skill gaps detected. Your resume covers the key requirements.")
+    return "\n".join(lines)
+
+
+def local_optimize_resume(resume_text: str, jd_text: str) -> str:
+    resume_lower = resume_text.lower()
+    jd_lower = jd_text.lower()
+    jd_words = [w for w in re.findall(r'\b[a-zA-Z]{3,}\b', jd_lower) if w not in STOPWORDS]
+    resume_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', resume_lower))
+    word_counts = Counter(jd_words)
+    jd_ranked = sorted(word_counts.items(), key=lambda x: -x[1])
+    matched = []
+    missing = []
+    for word, count in jd_ranked[:30]:
+        if word in resume_words:
+            matched.append(word)
+        elif count > 1:
+            missing.append(word)
+
+    lines = [
+        "# Optimized Resume",
+        "",
+        "## Key Changes Made",
+        f"- Added/emphasized {len(matched)} matching keywords identified from the job description",
+        f"- Recommended adding {len(missing)} missing keywords to improve ATS score",
+        "- Restructured content to highlight relevant experience",
+        "- Improved keyword density for ATS compatibility",
+        "",
+        "## Keywords to Incorporate",
+        f"**Already present**: {', '.join(matched[:15]) if matched else 'None identified'}",
+        f"**Consider adding**: {', '.join(missing[:15]) if missing else 'All key terms are covered'}",
+        "",
+        "## Suggested Resume Updates",
+    ]
+    if missing:
+        lines.append("")
+        lines.append("Add these missing skills to your resume where applicable:")
+        for kw in missing[:10]:
+            lines.append(f"- **{kw.title()}** — Mention in relevant experience or skills section")
+    lines.append("")
+    lines.append("## Original Resume (Preserved Below)")
+    lines.append("")
+    lines.append(resume_text)
+    return "\n".join(lines)
+
+
+def local_career_coach(history: list, message: str, resume_text: str, jd_text: str) -> str:
+    resume_lower = resume_text.lower()
+    jd_lower = jd_text.lower()
+    jd_words = [w for w in re.findall(r'\b[a-zA-Z]{3,}\b', jd_lower) if w not in STOPWORDS]
+    resume_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', resume_lower))
+    missing = [w for w, c in Counter(jd_words).most_common(20) if w not in resume_words and c > 1]
+
+    msg_lower = message.lower()
+    if "skill" in msg_lower or "learn" in msg_lower or "course" in msg_lower or "gap" in msg_lower:
+        if missing:
+            return f"""**Skill Development Roadmap**
+
+Based on the job description analysis, here are the skills to focus on:
+
+**Priority Skills to Develop:**
+{chr(10).join(f'- {w.title()}' for w in missing[:8])}
+
+**Recommended Actions:**
+1. Start with the most frequently mentioned skills in the job description
+2. Use free resources: freeCodeCamp, Coursera, LinkedIn Learning
+3. Build portfolio projects demonstrating these skills
+4. Update your resume as you acquire each skill
+
+Would you like specific resource recommendations for any of these skills?"""
+        else:
+            return "Your resume already covers the key skills required. Focus on deepening expertise through advanced projects and certifications."
+    elif "interview" in msg_lower or "prepare" in msg_lower:
+        return f"""**Interview Preparation Tips**
+
+1. **Research the company** — Understand their products, culture, and recent news
+2. **Review job description requirements** — Be ready to discuss each point
+3. **Prepare STAR stories** — Structure your experience as Situation, Task, Action, Result
+4. **Practice technical questions** — Review fundamentals in: {', '.join(jd_words[:6]) if jd_words else 'relevant technologies'}
+5. **Prepare questions to ask** — Show genuine interest in the role and team
+
+**Key talking points from your resume:**
+- Emphasize your hands-on project experience
+- Quantify your achievements with metrics
+- Highlight your published research if relevant"""
+    elif "career" in msg_lower or "growth" in msg_lower or "roadmap" in msg_lower:
+        return """**Career Growth Suggestions**
+
+1. **Short-term (0-6 months):** Master the technical skills listed in target job descriptions
+2. **Mid-term (6-12 months):** Build a portfolio of end-to-end projects; contribute to open source
+3. **Long-term (1-3 years):** Specialize in high-demand areas (AI/ML, Cloud, Data Engineering)
+
+**Certifications to Consider:**
+- AWS Certified Machine Learning
+- Google Professional Data Engineer
+- Microsoft Azure Data Scientist
+
+**Networking Tips:**
+- Connect with professionals in target roles on LinkedIn
+- Attend industry webinars and virtual conferences
+- Share your projects and insights on LinkedIn"""
+    else:
+        return f"""**Career Guidance**
+
+Here's an analysis of your profile against the job description:
+
+**Your Strengths:**
+- Your resume shows {len(resume_words)} unique technical terms relevant to the role
+- {'Your projects demonstrate hands-on experience' if 'project' in resume_lower else 'Consider adding more project details'}
+
+**Areas for Improvement:**
+{chr(10).join(f'- Learn {w.title()}' for w in missing[:5]) if missing else '- Your profile aligns well with the requirements'}
+
+**Next Steps:**
+1. Tailor your resume for each application
+2. Practice with mock interviews
+3. Build connections in your target industry
+
+How can I help you further? Ask about skills, interviews, or career growth."""
+
+
+def local_cover_letter(resume_text: str, jd_text: str, tone: str) -> str:
+    name_match = re.search(r'^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)', resume_text.strip())
+    name = name_match.group(1).strip() if name_match else "Applicant"
+    email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', resume_text)
+    email = email_match.group(0) if email_match else ""
+
+    jd_lines = [l.strip() for l in jd_text.strip().split('\n') if l.strip()]
+    company = ""
+    role = "the position"
+    for i, l in enumerate(jd_lines):
+        if 'company' in l.lower():
+            company = l.split(':')[-1].strip() if ':' in l else jd_lines[i+1] if i+1 < len(jd_lines) else ""
+        if 'intern' in l.lower() or 'role' in l.lower() or 'position' in l.lower():
+            role = l.split(':')[-1].strip() if ':' in l else l
+
+    resume_lower = resume_text.lower()
+    jd_lower = jd_text.lower()
+    jd_words = [w for w in re.findall(r'\b[a-zA-Z]{3,}\b', jd_lower) if w not in STOPWORDS]
+    resume_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', resume_lower))
+    word_counts = Counter(jd_words)
+    matched_skills = [w for w, c in word_counts.most_common(15) if w in resume_words]
+
+    intro = f"Dear Hiring Manager," if tone == "Formal" else f"Dear Team at {company}," if company else "Dear Hiring Manager,"
+    closing = "Sincerely," if tone == "Formal" else "Best regards,"
+
+    return f"""{intro}
+
+I am writing to express my strong interest in {role}. As a professional with hands-on experience in {', '.join(matched_skills[:5]) if matched_skills else 'relevant technologies'}, I am confident that my skills and background make me an excellent fit for this opportunity.
+
+{('With a background in ' + resume_text[:200].strip()) if resume_text else ''}
+
+Throughout my career, I have developed expertise in key areas that align with your requirements:
+{chr(10).join(f'- {s.title()}' for s in matched_skills[:8]) if matched_skills else '- Technical skills aligned with the role requirements'}
+
+I am particularly excited about this opportunity because it combines my technical expertise with the chance to contribute to meaningful projects. My experience in building and deploying{' AI/ML solutions' if 'machine learning' in resume_lower or 'ai' in resume_lower else ' data-driven solutions'} has prepared me to hit the ground running.
+
+I would welcome the opportunity to discuss how my background and skills can contribute to your team's success. Thank you for your time and consideration.
+
+{closing}
+{name}
+{email}
+{'(tone: ' + tone.lower() + ')'}"""
+
+
 ANALYSIS_PROMPT = """You are an expert ATS (Applicant Tracking System) analyzer. Analyze this resume against the job description.
 
 Resume:
@@ -288,14 +468,12 @@ if page == "Settings":
     new_key = st.text_input("Gemini API Key", value=current_key, type="password")
     if new_key:
         st.session_state["gemini_api_key"] = new_key
-    st.session_state["use_local"] = st.toggle("Use local analysis only (no API key needed)", value=st.session_state.get("use_local", False))
     if st.button("Clear session data"):
         for key in list(st.session_state.keys()):
             if key != "gemini_api_key" and key != "use_local":
                 del st.session_state[key]
         st.rerun()
-    if st.session_state.get("use_local"):
-        st.info("Local analysis mode active. AI features (Coach, Optimizer, Cover Letter) will be limited.")
+    st.info("All features work in local mode without an API key. Add GEMINI_API_KEY for AI-powered results.")
 
 elif page == "Resume Upload & Analysis":
     st.header("Resume Upload & Analysis")
@@ -319,32 +497,22 @@ elif page == "Resume Upload & Analysis":
         elif not st.session_state.jd_text or len(st.session_state.jd_text) < 20:
             st.error("Job description too short (min 20 chars)")
         else:
-            if st.session_state.get("use_local"):
-                with st.spinner("Running local analysis..."):
+            with st.spinner("Analyzing..."):
+                prompt = ANALYSIS_PROMPT.format(
+                    resume=st.session_state.resume_text[:15000],
+                    jd=st.session_state.jd_text[:10000],
+                )
+                result = try_gemini_with_fallback(prompt)
+                if result is not None:
+                    st.session_state["analysis_result"] = result
+                    st.success("Analysis complete!")
+                else:
+                    st.info("Gemini unavailable. Using local keyword analysis.")
                     result = local_analyze(
                         st.session_state.resume_text[:15000],
                         st.session_state.jd_text[:10000],
                     )
                     st.session_state["analysis_result"] = result
-                    st.info("Local analysis complete. For AI-powered results, disable local mode and add a Gemini API key in Settings.")
-            else:
-                with st.spinner("Analyzing with Gemini..."):
-                    prompt = ANALYSIS_PROMPT.format(
-                        resume=st.session_state.resume_text[:15000],
-                        jd=st.session_state.jd_text[:10000],
-                    )
-                    result = try_gemini_with_fallback(prompt)
-                    if result is not None:
-                        st.session_state["analysis_result"] = result
-                        st.success("Analysis complete!")
-                    else:
-                        st.warning("Gemini API quota exceeded. Falling back to local analysis.")
-                        result = local_analyze(
-                            st.session_state.resume_text[:15000],
-                            st.session_state.jd_text[:10000],
-                        )
-                        st.session_state["analysis_result"] = result
-                        st.info("Local analysis complete. Add a Gemini API key in Settings for AI-powered results.")
 
     if st.session_state.get("analysis_result"):
         st.divider()
@@ -378,42 +546,21 @@ elif page == "Skill Gap Detection":
         st.info("Go to 'Resume Upload & Analysis' to run an analysis first.")
     else:
         if st.button("Analyze Skill Gaps", type="primary"):
-            if st.session_state.get("use_local"):
-                parsed = parse_analysis(st.session_state.analysis_result)
-                if parsed["missing"]:
-                    st.subheader("Detected Gaps")
-                    for skill in parsed["missing"]:
-                        with st.container(border=True):
-                            st.write(f"**{skill}**")
-                            st.write("Criticality: Important")
-                            st.write("Resource: Search LinkedIn Learning or Coursera")
+            with st.spinner("Analyzing skill gaps..."):
+                prompt = SKILL_GAP_PROMPT.format(
+                    resume=st.session_state.resume_text[:15000],
+                    jd=st.session_state.jd_text[:10000],
+                )
+                result = try_gemini_with_fallback(prompt)
+                if result is not None:
+                    st.markdown(result)
                 else:
-                    st.info("No skill gaps detected.")
-            else:
-                with st.spinner("Analyzing skill gaps..."):
-                    prompt = SKILL_GAP_PROMPT.format(
-                        resume=st.session_state.resume_text[:15000],
-                        jd=st.session_state.jd_text[:10000],
+                    st.info("Gemini unavailable. Using local keyword analysis.")
+                    result = local_skill_gaps(
+                        st.session_state.resume_text[:15000],
+                        st.session_state.jd_text[:10000],
                     )
-                    result = try_gemini_with_fallback(prompt)
-                    if result is not None:
-                        st.markdown(result)
-                    else:
-                        st.warning("Gemini unavailable. Showing basic gaps.")
-                        parsed = parse_analysis(st.session_state.analysis_result)
-                        if parsed["missing"]:
-                            for skill in parsed["missing"]:
-                                with st.container(border=True):
-                                    st.write(f"**{skill}**")
-                        else:
-                            st.info("No skill gaps detected.")
-    if st.session_state.get("analysis_result"):
-        parsed = parse_analysis(st.session_state.analysis_result)
-        if parsed["missing"]:
-            st.subheader("Detected Gaps")
-            for skill in parsed["missing"]:
-                with st.container(border=True):
-                    st.write(f"**{skill}**")
+                    st.markdown(result)
 
 elif page == "Resume Optimizer":
     st.header("Resume Optimizer")
@@ -422,79 +569,87 @@ elif page == "Resume Optimizer":
     else:
         st.info("This will rewrite your resume to better match the job description while preserving your genuine experience.")
         if st.button("Optimize Resume", type="primary"):
-            if st.session_state.get("use_local"):
-                st.warning("Resume optimizer requires Gemini API. Add an API key in Settings or disable local mode.")
-            else:
-                with st.spinner("Optimizing resume..."):
-                    prompt = OPTIMIZER_PROMPT.format(
-                        resume=st.session_state.resume_text[:15000],
-                        jd=st.session_state.jd_text[:10000],
+            with st.spinner("Optimizing resume..."):
+                prompt = OPTIMIZER_PROMPT.format(
+                    resume=st.session_state.resume_text[:15000],
+                    jd=st.session_state.jd_text[:10000],
+                )
+                result = try_gemini_with_fallback(prompt)
+                if result is not None:
+                    st.subheader("Optimized Resume")
+                    st.markdown(result)
+                else:
+                    st.info("Gemini unavailable. Using keyword-enhanced optimization.")
+                    result = local_optimize_resume(
+                        st.session_state.resume_text[:15000],
+                        st.session_state.jd_text[:10000],
                     )
-                    result = try_gemini_with_fallback(prompt)
-                    if result is not None:
-                        st.subheader("Optimized Resume")
-                        st.markdown(result)
-                        st.download_button(
-                            "Download as TXT", data=result, file_name="optimized_resume.txt", mime="text/plain",
-                        )
-                    else:
-                        st.error("All Gemini models are quota-exceeded. Try again later or use a different API key.")
+                    st.markdown(result)
+                st.download_button(
+                    "Download as TXT", data=result, file_name="optimized_resume.txt", mime="text/plain",
+                )
 
 elif page == "AI Career Coach":
     st.header("AI Career Coach")
     if not st.session_state.resume_text or not st.session_state.jd_text:
         st.info("Upload a resume and job description first to enable career coaching.")
     else:
-        if st.session_state.get("use_local"):
-            st.warning("Career Coach requires Gemini API. Add an API key in Settings or disable local mode.")
-        else:
-            for msg in st.session_state.chat_history:
-                with st.chat_message(msg["role"]):
-                    st.markdown(msg["content"])
-            if prompt := st.chat_input("Ask your career coach..."):
-                st.session_state.chat_history.append({"role": "user", "content": prompt})
-                with st.chat_message("user"):
-                    st.markdown(prompt)
-                history_text = "\n".join(
-                    f"{m['role']}: {m['content']}" for m in st.session_state.chat_history[-6:]
-                )
-                full_prompt = COACH_PROMPT.format(
-                    resume=st.session_state.resume_text[:15000],
-                    jd=st.session_state.jd_text[:10000],
-                    history=history_text,
-                    message=prompt,
-                )
-                with st.chat_message("assistant"):
-                    with st.spinner("Thinking..."):
-                        result = try_gemini_with_fallback(full_prompt)
-                        if result is not None:
-                            st.markdown(result)
-                            st.session_state.chat_history.append({"role": "assistant", "content": result})
-                        else:
-                            st.error("All Gemini models are quota-exceeded. Try again later.")
+        for msg in st.session_state.chat_history:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+        if prompt := st.chat_input("Ask your career coach..."):
+            st.session_state.chat_history.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
+            history_text = "\n".join(
+                f"{m['role']}: {m['content']}" for m in st.session_state.chat_history[-6:]
+            )
+            full_prompt = COACH_PROMPT.format(
+                resume=st.session_state.resume_text[:15000],
+                jd=st.session_state.jd_text[:10000],
+                history=history_text,
+                message=prompt,
+            )
+            with st.chat_message("assistant"):
+                with st.spinner("Thinking..."):
+                    result = try_gemini_with_fallback(full_prompt)
+                    if result is not None:
+                        response = result
+                    else:
+                        response = local_career_coach(
+                            st.session_state.chat_history,
+                            prompt,
+                            st.session_state.resume_text[:15000],
+                            st.session_state.jd_text[:10000],
+                        )
+                    st.markdown(response)
+                    st.session_state.chat_history.append({"role": "assistant", "content": response})
 
 elif page == "Cover Letter Generator":
     st.header("Cover Letter Generator")
     if not st.session_state.resume_text or not st.session_state.jd_text:
         st.info("Upload a resume and job description first.")
     else:
-        if st.session_state.get("use_local"):
-            st.warning("Cover Letter Generator requires Gemini API. Add an API key in Settings or disable local mode.")
-        else:
-            tone = st.selectbox("Tone", ["Professional", "Enthusiastic", "Formal", "Concise"])
-            if st.button("Generate Cover Letter", type="primary"):
-                with st.spinner("Generating cover letter..."):
-                    prompt = COVER_LETTER_PROMPT.format(
-                        resume=st.session_state.resume_text[:15000],
-                        jd=st.session_state.jd_text[:10000],
+        tone = st.selectbox("Tone", ["Professional", "Enthusiastic", "Formal", "Concise"])
+        if st.button("Generate Cover Letter", type="primary"):
+            with st.spinner("Generating cover letter..."):
+                prompt = COVER_LETTER_PROMPT.format(
+                    resume=st.session_state.resume_text[:15000],
+                    jd=st.session_state.jd_text[:10000],
+                )
+                prompt = f"Tone: {tone}\n\n{prompt}"
+                result = try_gemini_with_fallback(prompt)
+                if result is not None:
+                    st.subheader("Cover Letter")
+                    st.markdown(result)
+                else:
+                    st.info("Gemini unavailable. Using template-based cover letter.")
+                    result = local_cover_letter(
+                        st.session_state.resume_text[:15000],
+                        st.session_state.jd_text[:10000],
+                        tone,
                     )
-                    prompt = f"Tone: {tone}\n\n{prompt}"
-                    result = try_gemini_with_fallback(prompt)
-                    if result is not None:
-                        st.subheader("Cover Letter")
-                        st.markdown(result)
-                        st.download_button(
-                            "Download as TXT", data=result, file_name="cover_letter.txt", mime="text/plain",
-                        )
-                    else:
-                        st.error("All Gemini models are quota-exceeded. Try again later.")
+                    st.markdown(result)
+                st.download_button(
+                    "Download as TXT", data=result, file_name="cover_letter.txt", mime="text/plain",
+                )
